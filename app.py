@@ -4,9 +4,9 @@ import pandas as pd
 import requests
 import io
 
-st.set_page_config(page_title="Nifty 500 Daily Breakout Scanner", layout="wide")
-st.title("🦅 Nifty 500 - Daily Breakout & RS Scanner")
-st.write("Tracking Top 20% RS, Daily 20/50/200 SMA, 20-Day High/Low & Base Width.")
+st.set_page_config(page_title="First Breakout & RS Scanner", layout="wide")
+st.title("🦅 Nifty 500 - First Breakout Scanner")
+st.write("Tracking Volume Alerts & Fresh 20D Breakouts after a Pullback to avoid extended entries.")
 
 @st.cache_data
 def get_nifty_500():
@@ -18,12 +18,10 @@ def get_nifty_500():
 
 if st.button("Start Scan (Nifty 500)"):
     status = st.empty()
-    
     status.text("Fetching Nifty 500 stock list from NSE...")
     tickers = get_nifty_500()
     
     status.text("Downloading daily market data... (isme 1-2 minute lag sakte hain)")
-    
     data = yf.download(tickers, period="1y", interval="1d", group_by="ticker", progress=False, threads=True)
     
     results = []
@@ -31,41 +29,73 @@ if st.button("Start Scan (Nifty 500)"):
         try:
             if t not in data.columns.levels[0]: continue
             df = data[t]
-            close_prices = df['Close'].dropna()
-            high_prices = df['High'].dropna()
-            low_prices = df['Low'].dropna()
             
-            if len(close_prices) > 200:
-                cmp = float(close_prices.iloc[-1])
-                sma_20 = float(close_prices.rolling(window=20).mean().iloc[-1])
-                sma_50 = float(close_prices.rolling(window=50).mean().iloc[-1])
-                sma_200 = float(close_prices.rolling(window=200).mean().iloc[-1])
+            if len(df) > 200:
+                cmp = float(df['Close'].iloc[-1])
+                sma_20 = float(df['Close'].rolling(window=20).mean().iloc[-1])
+                sma_50 = float(df['Close'].rolling(window=50).mean().iloc[-1])
+                sma_200 = float(df['Close'].rolling(window=200).mean().iloc[-1])
                 
-                high_20d = float(high_prices.tail(20).max())
-                low_20d = float(low_prices.tail(20).min())
+                # 20D High/Low & Volume calculation (using previous day data for accuracy)
+                df['Prev_20D_High'] = df['High'].shift(1).rolling(window=20).max()
+                df['Prev_20D_Low'] = df['Low'].shift(1).rolling(window=20).min()
+                df['Avg_Vol_20'] = df['Volume'].shift(1).rolling(window=20).mean()
                 
-                base_width_pct = ((high_20d - low_20d) / low_20d) * 100 if low_20d > 0 else 0
-                dist_to_breakout = ((high_20d - cmp) / cmp) * 100 if cmp > 0 else 0
+                # Volume Alert
+                latest_vol = float(df['Volume'].iloc[-1])
+                avg_vol_20 = float(df['Avg_Vol_20'].iloc[-1])
+                vol_alert = "🚀 High Vol" if latest_vol > (1.5 * avg_vol_20) else "-"
                 
-                ret_3m = ((cmp - float(close_prices.iloc[-63])) / float(close_prices.iloc[-63])) * 100
+                # Logic to find the LAST 20D Low and the FIRST Breakout after that
+                df['Is_Low'] = df['Low'] <= df['Prev_20D_Low']
+                df['Is_High'] = df['High'] >= df['Prev_20D_High']
                 
+                last_60 = df.tail(60) # Scan last 3 months for the pattern
+                low_days = last_60[last_60['Is_Low']]
+                
+                if not low_days.empty:
+                    # Find the exact date it bottomed out
+                    recent_low_date = low_days.index[-1]
+                    subset = last_60.loc[recent_low_date:]
+                    
+                    # Find breakouts ONLY after it made the low
+                    breakouts = subset[subset['Is_High']]
+                    low_dt_str = recent_low_date.strftime("%d-%b")
+                    
+                    if len(breakouts) > 0:
+                        bo_date = breakouts.index[0]
+                        bo_price = breakouts['Prev_20D_High'].iloc[0]
+                        bo_dt_str = bo_date.strftime("%d-%b")
+                        bo_status = f"✅ Triggered ({bo_dt_str})"
+                        diff_pct = ((cmp - bo_price) / bo_price) * 100
+                    else:
+                        bo_price = float(df['Prev_20D_High'].iloc[-1])
+                        bo_status = "⏳ Waiting"
+                        diff_pct = ((cmp - bo_price) / bo_price) * 100
+                else:
+                    low_dt_str = "-"
+                    bo_price = float(df['Prev_20D_High'].iloc[-1])
+                    bo_status = "No recent 20D Low"
+                    diff_pct = ((cmp - bo_price) / bo_price) * 100
+                
+                # 3M Return for RS
+                ret_3m = ((cmp - float(df['Close'].iloc[-63])) / float(df['Close'].iloc[-63])) * 100
                 symbol_clean = t.replace(".NS", "")
-                tv_url = f"https://in.tradingview.com/chart/?symbol=NSE:{symbol_clean}"
-                screener_url = f"https://www.screener.in/company/{symbol_clean}/"
                 
                 results.append({
                     "Stock": symbol_clean,
                     "Close": cmp,
                     "3M Return %": ret_3m,
+                    "Vol Alert": vol_alert,
+                    "Last 20D Low": low_dt_str,
+                    "First BO Status": bo_status,
+                    "BO Level": bo_price,
+                    "% From Entry": diff_pct,
                     "20 SMA": sma_20,
                     "50 SMA": sma_50,
                     "200 SMA": sma_200,
-                    "20D High": high_20d,
-                    "20D Low": low_20d,
-                    "Base Gap %": base_width_pct,
-                    "Dist Breakout %": dist_to_breakout,
-                    "Chart": tv_url,
-                    "Fundamentals": screener_url
+                    "Chart": f"https://in.tradingview.com/chart/?symbol=NSE:{symbol_clean}",
+                    "Fundamentals": f"https://www.screener.in/company/{symbol_clean}/"
                 })
         except Exception:
             pass
@@ -76,6 +106,7 @@ if st.button("Start Scan (Nifty 500)"):
         df_all = pd.DataFrame(results)
         df_all['3M RS'] = (df_all['3M Return %'].rank(pct=True) * 100)
         
+        # Filter: Top 20% RS + Long Term Uptrend (Price > 200 SMA)
         final = df_all[
             (df_all['3M RS'] >= 80) & 
             (df_all['Close'] > df_all['200 SMA']) & 
@@ -86,7 +117,7 @@ if st.button("Start Scan (Nifty 500)"):
         status.empty() 
         
         if not final.empty:
-            st.success(f"✅ {len(final)} Stocks Found! (Strict 200-DMA & Top 20% RS Passed)")
+            st.success(f"✅ {len(final)} Stocks Found! (Top 20% RS & 200-DMA Passed)")
             display_df = final.sort_values(by="3M RS", ascending=False).drop(columns=['3M Return %'])
             
             st.dataframe(
@@ -94,12 +125,9 @@ if st.button("Start Scan (Nifty 500)"):
                 use_container_width=True, 
                 hide_index=True,
                 column_config={
-                    "Chart": st.column_config.LinkColumn(
-                        "📈 Chart", display_text="Open TV"
-                    ),
-                    "Fundamentals": st.column_config.LinkColumn(
-                        "📊 Fundamentals", display_text="Screener"
-                    )
+                    "Chart": st.column_config.LinkColumn("📈 Chart", display_text="Open TV"),
+                    "Fundamentals": st.column_config.LinkColumn("📊 Fundamentals", display_text="Screener"),
+                    "% From Entry": st.column_config.NumberColumn("% From Entry", format="%.2f %%")
                 }
             )
         else:
